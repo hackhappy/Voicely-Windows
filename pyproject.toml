@@ -1,0 +1,27 @@
+[project]
+name = "voicely"
+version = "0.1.0"
+description = "Offline dictation, call and file transcription for Windows with a local MCP server (Windows port of hackhappy/Voicely)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "sherpa-onnx>=2.0.1",
+    "numpy",
+    "soundfile",
+    "sounddevice",
+    "soundcard",
+    "pystray",
+    "pillow",
+    "pywin32",
+    "keyboard",
+    "mcp>=2.3,<3",
+]
+
+[project.scripts]
+voicely = "voicely.cli:main"
+
+[project.gui-scripts]
+voicely-app = "voicely.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
