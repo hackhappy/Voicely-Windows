@@ -117,7 +117,7 @@ def body(segments, timestamps=False, markdown=True):
     return "\n\n".join(paras)
 
 
-def render_file(segments, source, fmt="md", timestamps=False, model="Parakeet V3"):
+def render_file(segments, source, model, fmt="md", timestamps=False):
     if fmt == "jsonl":
         return jsonl(segments)
     text = body(segments, timestamps, markdown=fmt == "md")
@@ -137,7 +137,7 @@ def srt(segments):
     )
 
 
-def save_file_transcript(source, segments, timestamps=False, fmt="md"):
+def save_file_transcript(source, segments, model, timestamps=False, fmt="md"):
     root = BASE / "files"
     root.mkdir(parents=True, exist_ok=True)
     base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", Path(source).stem).strip(" .") or "file"
@@ -148,7 +148,7 @@ def save_file_transcript(source, segments, timestamps=False, fmt="md"):
     folder.mkdir()
     ext = "txt" if fmt == "txt" else "md"
     path = folder / f"transcript.{ext}"
-    _write(path, render_file(segments, Path(source).resolve(), "txt" if fmt == "txt" else "md", timestamps))
+    _write(path, render_file(segments, Path(source).resolve(), model, "txt" if fmt == "txt" else "md", timestamps))
     _write(folder / "transcript.srt", srt(segments))
     return path
 

@@ -23,11 +23,10 @@ import win32con
 import win32gui
 
 from . import engine, store
-from .cli import _engine, transcribe_path
+from .cli import _engine, model_name, transcribe_path
 
 user32, kernel32, gdi32 = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.gdi32
 SR = engine.SR
-CONFIG = engine.HOME / "config.json"
 LOGS = engine.HOME / "Logs"
 DEFAULTS = {"hotkey": "alt+space", "output": "cursor"}
 HOTKEY_PRESETS = [("Alt+Space (default)", "alt+space"), ("Ctrl+Space", "ctrl+space")]
@@ -477,16 +476,13 @@ class Overlay:
 
 class App:
     def __init__(self):
-        self.cfg = dict(DEFAULTS)
-        try:
-            self.cfg.update(json.loads(CONFIG.read_text("utf-8")))
-        except (OSError, ValueError):
-            pass
+        self.cfg = {**DEFAULTS, **engine.read_config(), "model": engine.selected_model()}
         self.calls = queue.Queue()
         self.files = queue.Queue()
         self.mic = None  # Capture while dictating
         self.transcribing = False
         self.call = None
+        self.download_status = None  # what the Model menu shows while a download runs
         self.root = tk.Tk()
         self.root.withdraw()
         self.overlay = Overlay(self.root)
@@ -505,7 +501,7 @@ class App:
         self.root.after(30, self._pump)
 
     def save_config(self):
-        CONFIG.write_text(json.dumps(self.cfg, indent=2), "utf-8")
+        engine.CONFIG.write_text(json.dumps(self.cfg, indent=2), "utf-8")
         self.icon.update_menu()
 
     def notify(self, message, title="Voicely"):
@@ -521,7 +517,7 @@ class App:
         if self.transcribing:
             return
         if not engine.models_ready():
-            return self.offer_download()
+            return self.pick_model(self.cfg["model"])
         import soundcard as sc
 
         cap = Capture(sc.default_microphone(), on_level=lambda v: self.ui(self.overlay.level, v))
@@ -590,7 +586,7 @@ class App:
             threading.Thread(target=self._finish_call, args=(folder,), daemon=True).start()
             return
         if not engine.models_ready():
-            return self.offer_download()
+            return self.pick_model(self.cfg["model"])
         try:
             self.call = CallRecording()
         except Exception as e:
@@ -633,7 +629,7 @@ class App:
             path, diarize = self.files.get()
             try:
                 self.notify(f"Transcribing {Path(path).name}…")
-                saved = store.save_file_transcript(path, transcribe_path(path, diarize))
+                saved = store.save_file_transcript(path, transcribe_path(path, diarize), model_name())
                 self.notify(f"Transcript saved: {saved.parent.name}")
                 subprocess.Popen(["explorer", "/select,", str(saved)])
             except Exception as e:
@@ -641,23 +637,51 @@ class App:
                 self.notify(f"Could not transcribe {Path(path).name}: {e}")
 
     # models
-    def offer_download(self):
-        if getattr(self, "downloading", False):
-            return self.notify("The speech model is still downloading…")
-        if messagebox.askyesno("Voicely", "Download the speech model Parakeet V3 and the diarization models "
-                               "(about 520 MB)? Everything then runs offline.", parent=self.root):
-            self.downloading = True
-            threading.Thread(target=self._download, daemon=True).start()
+    def ask(self, question):
+        self.root.attributes("-topmost", True)
+        answer = messagebox.askyesno("Voicely", question, parent=self.root)
+        self.root.attributes("-topmost", False)
+        return answer
 
-    def _download(self):
+    def pick_model(self, model_id):
+        """A downloaded model is a switch; only a download needs a yes."""
+        if engine.models_ready(model_id):
+            return self.set_model(model_id)
+        if self.download_status:
+            return self.notify("Another model is still downloading…")
+        m = engine.CATALOG[model_id]
+        if self.ask(f"Download {m['name']} ({m['size']})? Everything then runs offline."):
+            self.download_status = f"Downloading {m['name']}…"
+            self.refresh()
+            threading.Thread(target=self._download, args=(model_id,), daemon=True).start()
+
+    def set_model(self, model_id):
+        self.cfg["model"] = model_id
+        self.save_config()
+
+    def _download(self, model_id):
+        name = engine.CATALOG[model_id]["name"]
+
+        def progress(text):
+            self.download_status = text
+            self.refresh()
+
         try:
-            self.notify("Downloading the speech model…")
-            _engine.load()
-            self.notify(f"Voicely is ready. Press {combo_label(self.cfg['hotkey'])} to dictate.")
+            self.notify(f"Downloading {name}…")
+            engine.ensure_models(model_id, progress)
+            self.ui(self.set_model, model_id)
+            self.notify(f"{name} is ready. Press {combo_label(self.cfg['hotkey'])} to dictate.")
         except Exception as e:
             log.exception("model download failed")
-            self.notify(f"Model download failed: {e}")
-        self.downloading = False
+            self.notify(f"Could not download {name}: {e}")
+        self.download_status = None
+        self.refresh()
+
+    def delete_model(self, model_id):
+        m = engine.CATALOG[model_id]
+        if self.ask(f"Delete {m['name']}? This frees {m['size']} of disk space. You can download it again from the Model menu."):
+            _engine.delete(model_id)
+            self.refresh()
 
     # settings
     def set_hotkey(self, combo):
@@ -724,6 +748,16 @@ class App:
                 self.save_config()
             return M(OUTPUTS[key], pick, checked=lambda _: self.cfg["output"] == key, radio=True)
 
+        def model_item(model_id):
+            m = engine.CATALOG[model_id]
+            return M(lambda _: f"{m['name']} · {m['size']} · {m['hint']}" + ("  [downloaded]" if engine.model_ready(model_id) else ""),
+                     lambda: self.ui(self.pick_model, model_id), checked=lambda _: self.cfg["model"] == model_id, radio=True)
+
+        def delete_item(model_id):
+            m = engine.CATALOG[model_id]
+            return M(f"{m['name']} · {m['size']}", lambda: self.ui(self.delete_model, model_id),
+                     visible=lambda _: engine.model_ready(model_id) and self.cfg["model"] != model_id)
+
         menu = Menu(
             M(lambda _: f"{'Stop Dictation' if self.mic else 'Dictate'}  ({combo_label(self.cfg['hotkey'])})",
               lambda: self.ui(self.toggle_dictation)),
@@ -733,7 +767,9 @@ class App:
             M(lambda _: f"Hotkey: {combo_label(self.cfg['hotkey'])}", Menu(
                 *(hotkey_item(n, c) for n, c in HOTKEY_PRESETS), Menu.SEPARATOR,
                 M("Record Custom...", lambda: self.ui(self.record_hotkey)))),
-            M(f"Model: {engine.MODEL_NAME}", None, enabled=False),
+            M(lambda _: self.download_status or f"Model: {engine.CATALOG[self.cfg['model']]['name']}", Menu(
+                *(model_item(i) for i in engine.CATALOG), Menu.SEPARATOR,
+                M("Delete Downloaded Model", Menu(*(delete_item(i) for i in engine.CATALOG))))),
             M(lambda _: f"Output: {OUTPUTS[self.cfg['output']]}", Menu(*(output_item(k) for k in OUTPUTS))),
             Menu.SEPARATOR,
             M("Open Transcripts", lambda: (store.BASE.mkdir(parents=True, exist_ok=True), os.startfile(store.BASE))),
@@ -749,7 +785,9 @@ class App:
         messagebox.showinfo("About Voicely", f"Voicely for Windows {version('voicely')}\n\n"
                             "Offline dictation, call and file transcription.\n"
                             "Windows port of github.com/hackhappy/Voicely (MIT).\n\n"
-                            "Speech: NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0)\n"
+                            f"Speech: {model_name()}\n"
+                            "Parakeet V3: NVIDIA (CC-BY-4.0), Parakeet Ultra: moondream (CC-BY-4.0),\n"
+                            "GigaAM: SberDevices (MIT), Whisper: OpenAI (MIT)\n"
                             "Diarization: pyannote segmentation 3.0 + WeSpeaker\n"
                             "Runtime: sherpa-onnx, fully on-device.", parent=self.root)
 
@@ -769,7 +807,7 @@ class App:
         if engine.models_ready():
             threading.Thread(target=self.recover_calls, daemon=True).start()
         else:
-            self.root.after(500, self.offer_download)
+            self.root.after(500, self.pick_model, self.cfg["model"])
         self.root.after(30, self._pump)
         self.root.mainloop()
 

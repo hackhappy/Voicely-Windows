@@ -31,11 +31,16 @@ def transcribe_path(path, diarize=False):
     return segments
 
 
+def model_name():
+    return engine.CATALOG[_engine.wanted]["name"]
+
+
 def cmd_transcribe(a):
+    _engine.model_id = a.model
     segments = transcribe_path(a.path, a.diarize)
-    print(store.render_file(segments, Path(a.path).resolve(), a.format, a.timestamps))
+    print(store.render_file(segments, Path(a.path).resolve(), model_name(), a.format, a.timestamps))
     if a.save:
-        log(f"Saved {store.save_file_transcript(a.path, segments, a.timestamps, a.format)}")
+        log(f"Saved {store.save_file_transcript(a.path, segments, model_name(), a.timestamps, a.format)}")
 
 
 def cmd_list(a):
@@ -61,7 +66,7 @@ def cmd_show(a):
 def cmd_status(a):
     info = {
         "version": version("voicely"),
-        "model": engine.MODEL_NAME,
+        "model": model_name(),
         "models_ready": engine.models_ready(),
         "models_dir": str(engine.MODELS),
         "transcripts_dir": str(store.BASE),
@@ -72,8 +77,15 @@ def cmd_status(a):
 
 
 def cmd_download(a):
-    engine.ensure_models()
+    engine.ensure_models(a.model)
     log("Models ready.")
+
+
+def cmd_models(a):
+    current = engine.selected_model()
+    for model_id, m in engine.CATALOG.items():
+        mark, state = "*" if model_id == current else " ", "downloaded" if engine.model_ready(model_id) else ""
+        print(f"{mark} {model_id:22} {m['name']:17} {m['size']:8} {state:11} {m['hint']}")
 
 
 def cmd_connect(a):
@@ -110,14 +122,14 @@ def cmd_mcp(a):
 
     @server.tool()
     def transcribe_file(path: str, diarize: bool = False, language: Literal["auto", "ru", "en"] = "auto") -> str:
-        """Transcribe an audio or video file offline with Voicely (Parakeet V3, 25 languages, auto-detected).
+        """Transcribe an audio or video file offline with Voicely (the selected local model, language auto-detected).
         Optionally run speaker diarization. Returns the transcript text (speaker-labelled when diarize=true)
         and saves it under Documents\\Voicely\\files."""
         try:
             segments = transcribe_path(path, diarize)
         except (FileNotFoundError, RuntimeError) as e:
             raise ToolError(str(e)) from e
-        saved = store.save_file_transcript(path, segments)
+        saved = store.save_file_transcript(path, segments, model_name())
         return store.body(segments, markdown=False) + f"\n\n(saved: {saved})"
 
     @server.tool()
@@ -156,7 +168,8 @@ def main():
     t.add_argument("--diarize", action="store_true", help="label who spoke when")
     t.add_argument("--format", choices=["md", "txt", "jsonl"], default="md")
     t.add_argument("--language", choices=["auto", "ru", "en"], default="auto",
-                   help="accepted for compatibility; Parakeet V3 detects the language itself")
+                   help="accepted for compatibility; the models detect the language themselves")
+    t.add_argument("--model", choices=list(engine.CATALOG), help="default: the one selected in the tray menu")
     t.add_argument("--timestamps", action="store_true", help="per-segment timestamps in md/txt")
     t.add_argument("--save", action="store_true", help="also save under Documents\\Voicely\\files")
     t.set_defaults(fn=cmd_transcribe)
@@ -176,7 +189,10 @@ def main():
     st.add_argument("--json", action="store_true")
     st.set_defaults(fn=cmd_status)
 
-    sub.add_parser("download", help="Download the speech and diarization models").set_defaults(fn=cmd_download)
+    d = sub.add_parser("download", help="Download a speech model (default: the selected one) and the diarization models")
+    d.add_argument("model", nargs="?", choices=list(engine.CATALOG))
+    d.set_defaults(fn=cmd_download)
+    sub.add_parser("models", help="List speech models; * marks the selected one").set_defaults(fn=cmd_models)
     sub.add_parser("mcp", help="Run the stdio MCP server").set_defaults(fn=cmd_mcp)
     c = sub.add_parser("connect", help="Register the MCP server with installed agents (claude, codex, cursor)")
     c.add_argument("harness", nargs="?")
