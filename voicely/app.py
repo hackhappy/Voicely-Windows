@@ -339,27 +339,28 @@ class PillArt:
     """The pill as pixels: a light glass capsule with water inside, antialiased through distance fields."""
     # surface colour, depth colour, opacity, share of the water level, drift speed, wave number, phase
     LAYERS = (
-        ((0.72, 0.92, 1.00), (0.58, 0.86, 0.99), 0.60, 1.00, 1.1, 0.034, 0.0),
-        ((0.50, 0.83, 0.99), (0.36, 0.74, 0.97), 0.70, 0.80, -1.6, 0.052, 1.7),
-        ((0.38, 0.76, 0.98), (0.20, 0.62, 0.94), 0.85, 0.60, 2.3, 0.071, 3.1),
+        ((0.72, 0.92, 1.00), (0.58, 0.86, 0.99), 0.50, 1.00, 1.1, 0.050, 0.0),
+        ((0.50, 0.83, 0.99), (0.36, 0.74, 0.97), 0.60, 0.80, -1.6, 0.075, 1.7),
+        ((0.38, 0.76, 0.98), (0.20, 0.62, 0.94), 0.75, 0.60, 2.3, 0.100, 3.1),
     )
     GLASS, WHITE, RIM, INK = (0.97, 0.985, 1.0), (1.0, 1.0, 1.0), (0.72, 0.80, 0.88), (0.07, 0.19, 0.30)
+    GLASS_OPACITY = 0.78
 
     def __init__(self, scale=1.0):
         self.s = s = scale
-        self.m, self.h = int(20 * s), int(52 * s)
-        self.fw, self.fh = int(264 * s) + 2 * self.m, self.h + 2 * self.m
+        self.m, self.h = int(14 * s), int(32 * s)
+        self.fw, self.fh = int(172 * s) + 2 * self.m, self.h + 2 * self.m
         self.x = np.arange(self.fw, dtype=np.float32)
         self.y = np.arange(self.fh, dtype=np.float32)[:, None]
         radius, self.mid = self.h / 2, self.fh / 2
         spine = np.clip(self.x, self.m + radius, self.fw - self.m - radius)
         edge = np.hypot(self.x - spine, self.y - self.mid) - radius
         self.inside = np.clip(0.5 - edge, 0, 1)
-        shadow = 0.20 * np.exp(-(np.maximum(np.hypot(self.x - spine, self.y - self.mid - 5 * s) - radius, 0) / (9 * s)) ** 2)
+        shadow = 0.16 * np.exp(-(np.maximum(np.hypot(self.x - spine, self.y - self.mid - 3 * s) - radius, 0) / (6 * s)) ** 2)
         self.base = np.zeros((self.fh, self.fw, 4), np.float32)
         _over(self.base, self.INK, shadow)
-        _over(self.base, self.GLASS, self.inside)
-        self.sheen = self.inside * np.clip(1 - (self.y - self.m) / (self.h * 0.5), 0, 1) ** 2 * 0.35
+        _over(self.base, self.GLASS, self.inside * self.GLASS_OPACITY)
+        self.sheen = self.inside * np.clip(1 - (self.y - self.m) / (self.h * 0.5), 0, 1) ** 2 * 0.25
         self.rim = np.clip(1.2 - np.abs(edge + 0.7), 0, 1) * 0.55
         self.box = np.s_[self.m:-self.m, self.m:-self.m]  # the capsule: all per-frame work stays in here
         self.bx, self.by, self.mask = self.x[self.m:-self.m], self.y[self.m:-self.m], self.inside[self.box]
@@ -371,8 +372,8 @@ class PillArt:
     def label(self, text):
         from PIL import Image, ImageDraw, ImageFont
 
-        font = ImageFont.truetype("seguisb.ttf", int(14 * self.s))
-        start = (self.fw - font.getlength(text) + 18 * self.s) / 2  # dot + text centred as one group
+        font = ImageFont.truetype("seguisb.ttf", int(12 * self.s))
+        start = (self.fw - font.getlength(text) + 14 * self.s) / 2  # dot + text centred as one group
         canvas = Image.new("L", (self.fw, self.fh))
         ImageDraw.Draw(canvas).text((start, self.mid), text, fill=255, font=font, anchor="lm")
         glass = np.zeros((self.fh, self.fw, 4), np.float32)
@@ -380,7 +381,7 @@ class PillArt:
         _over(glass, self.RIM, self.rim)
         _over(glass, self.INK, np.asarray(canvas, np.float32) / 255)
         self.glass = glass[self.box]
-        self.dot_x = int(start - 14 * self.s)
+        self.dot_x = int(start - 11 * self.s)
 
     def frame(self, t, level, dot):
         """Premultiplied BGRA for UpdateLayeredWindow. level 0..1 is the voice; dot is an (r, g, b) status colour."""
@@ -390,13 +391,13 @@ class PillArt:
         for tint, (*_, opacity, share, speed, k, phase) in zip(self.tints, self.LAYERS):
             x = self.bx / self.s * k
             wave = 0.6 * np.sin(x + t * speed + phase) + 0.4 * np.sin(1.9 * x - 1.4 * t * speed + 2 * phase)
-            depth = self.by - (bottom - (0.30 + 0.38 * level) * self.h * share - (1.6 + 9 * level) * self.s * wave)
+            depth = self.by - (bottom - (0.30 + 0.38 * level) * self.h * share - (0.03 + 0.17 * level) * self.h * wave)
             _over(water, tint, np.clip(depth + 0.5, 0, 1) * self.mask * opacity)
-        _over(water, self.WHITE, np.clip(1 - np.abs(depth) / (1.6 * self.s), 0, 1) * self.mask * 0.5)  # glint on the front wave
+        _over(water, self.WHITE, np.clip(1 - np.abs(depth) / (1.2 * self.s), 0, 1) * self.mask * 0.5)  # glint on the front wave
         water[:] = self.glass + water * (1 - self.glass[..., 3:])
-        r, cy = int(7 * self.s), int(self.mid)
+        r, cy = int(6 * self.s), int(self.mid)
         spot = np.s_[cy - r:cy + r, self.dot_x - r:self.dot_x + r]
-        radius = (4.4 + 0.7 * np.sin(t * 5)) * self.s
+        radius = (3.3 + 0.5 * np.sin(t * 5)) * self.s
         _over(out[spot], dot, np.clip(radius - np.hypot(self.x[spot[1]] - self.dot_x, self.y[spot[0]] - self.mid) + 0.5, 0, 1))
         return (out[..., [2, 1, 0, 3]] * 255).astype(np.uint8, order="C")  # raw memory for SetBitmapBits
 
@@ -566,7 +567,7 @@ class App:
                 self.ui(self.overlay.show, "No speech detected", "#8e8e93", False, 1500)
         except Exception:
             log.exception("delivery failed")
-            self.ui(self.overlay.show, "Saved, but could not insert", "#ff9f0a", False, 3000)
+            self.ui(self.overlay.show, "Saved, not inserted", "#ff9f0a", False, 3000)
         finally:
             self.transcribing = False
             self.refresh()
