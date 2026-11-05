@@ -1,14 +1,18 @@
 """On-device speech engine: Parakeet TDT 0.6B v3 + pyannote/WeSpeaker diarization via sherpa-onnx."""
+import ctypes
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
 import numpy as np
+import win32api
 
 SR = 16000
 # Not %LOCALAPPDATA%: MSIX-packaged apps (Claude Desktop launching `voicely mcp`) get a private copy of it.
@@ -30,6 +34,11 @@ DOWNLOADS = {  # target -> url; .tar.bz2 archives hold a folder named like the t
 # Whole-clip decoding up to this length; longer audio is cut at pauses by the VAD.
 MAX_DIRECT_SECONDS = 25
 THREADS = max(1, (os.cpu_count() or 2) // 2)
+# The loaded model holds ~700 MB of RAM, so it only stays while it is in use.
+IDLE_UNLOAD_SECONDS = 300
+BUSY_UNLOAD_SECONDS = 60  # grace period: back-to-back dictations in a game stay fast
+WATCH_SECONDS = 15
+RAM_BUSY_PERCENT = 85
 
 
 def log(msg):
@@ -69,6 +78,14 @@ def ensure_models(progress=log):
             part.replace(target)
 
 
+def system_busy():
+    """A fullscreen game or app is in front, or RAM is nearly full."""
+    state = ctypes.c_int()
+    ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state))
+    # QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE
+    return state.value in (2, 3, 4) or win32api.GlobalMemoryStatusEx()["MemoryLoad"] >= RAM_BUSY_PERCENT
+
+
 def load_audio(path):
     """Any audio/video file -> 16 kHz mono float32 (needs ffmpeg on PATH)."""
     try:
@@ -88,13 +105,30 @@ class Engine:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._asr = self._vad_config = self._diarizer = None
+        self._asr = self._vad_config = self._diarizer = self._watcher = None
+        self.last_used = time.monotonic()
 
     def load(self):
         with self._lock:
             self._recognizer()
+            self.last_used = time.monotonic()
+
+    def _should_unload(self):
+        idle = time.monotonic() - self.last_used
+        return idle > IDLE_UNLOAD_SECONDS or (idle > BUSY_UNLOAD_SECONDS and system_busy())
+
+    def _watch(self):
+        while True:
+            time.sleep(WATCH_SECONDS)
+            with self._lock:  # waits out a running transcription, which then counts as fresh use
+                if (self._asr or self._diarizer) and self._should_unload():
+                    self._asr = self._diarizer = None
+                    logging.getLogger("voicely").info("model unloaded")
 
     def _recognizer(self):
+        if self._watcher is None:
+            self._watcher = threading.Thread(target=self._watch, daemon=True)
+            self._watcher.start()
         if self._asr is None:
             ensure_models()
             import sherpa_onnx
@@ -149,6 +183,7 @@ class Engine:
                 asr.decode_stream(stream)
                 r = stream.result
                 segments += sentences(r.tokens, r.timestamps, offset, offset + len(chunk) / SR)
+            self.last_used = time.monotonic()
             return segments
 
     def diarize(self, samples):
@@ -174,6 +209,7 @@ class Engine:
                     raise RuntimeError("diarization models are incomplete")
                 self._diarizer = sherpa_onnx.OfflineSpeakerDiarization(config)
             result = self._diarizer.process(np.asarray(samples, np.float32)).sort_by_start_time()
+            self.last_used = time.monotonic()
             return [(s.start, s.end, s.speaker) for s in result]
 
 

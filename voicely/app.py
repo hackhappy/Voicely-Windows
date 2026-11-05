@@ -11,7 +11,6 @@ import threading
 import time
 import tkinter as tk
 import warnings
-from collections import deque
 from ctypes import wintypes
 from datetime import datetime
 from importlib.metadata import version
@@ -19,11 +18,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import numpy as np
+import win32api
+import win32con
+import win32gui
 
 from . import engine, store
 from .cli import _engine, transcribe_path
 
-user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+user32, kernel32, gdi32 = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.gdi32
 SR = engine.SR
 CONFIG = engine.HOME / "config.json"
 LOGS = engine.HOME / "Logs"
@@ -326,66 +328,148 @@ def journal(app, route, chars):
 
 # ---------- overlay ----------
 
+def _over(dst, colour, alpha):
+    """Composite a colour with per-pixel alpha onto premultiplied RGBA, in place."""
+    a = alpha[..., None]
+    dst[..., :3] = dst[..., :3] * (1 - a) + np.asarray(colour, np.float32) * a
+    dst[..., 3] = dst[..., 3] * (1 - alpha) + alpha
+
+
+class PillArt:
+    """The pill as pixels: a light glass capsule with water inside, antialiased through distance fields."""
+    # surface colour, depth colour, opacity, share of the water level, drift speed, wave number, phase
+    LAYERS = (
+        ((0.72, 0.92, 1.00), (0.58, 0.86, 0.99), 0.60, 1.00, 1.1, 0.034, 0.0),
+        ((0.50, 0.83, 0.99), (0.36, 0.74, 0.97), 0.70, 0.80, -1.6, 0.052, 1.7),
+        ((0.38, 0.76, 0.98), (0.20, 0.62, 0.94), 0.85, 0.60, 2.3, 0.071, 3.1),
+    )
+    GLASS, WHITE, RIM, INK = (0.97, 0.985, 1.0), (1.0, 1.0, 1.0), (0.72, 0.80, 0.88), (0.07, 0.19, 0.30)
+
+    def __init__(self, scale=1.0):
+        self.s = s = scale
+        self.m, self.h = int(20 * s), int(52 * s)
+        self.fw, self.fh = int(264 * s) + 2 * self.m, self.h + 2 * self.m
+        self.x = np.arange(self.fw, dtype=np.float32)
+        self.y = np.arange(self.fh, dtype=np.float32)[:, None]
+        radius, self.mid = self.h / 2, self.fh / 2
+        spine = np.clip(self.x, self.m + radius, self.fw - self.m - radius)
+        edge = np.hypot(self.x - spine, self.y - self.mid) - radius
+        self.inside = np.clip(0.5 - edge, 0, 1)
+        shadow = 0.20 * np.exp(-(np.maximum(np.hypot(self.x - spine, self.y - self.mid - 5 * s) - radius, 0) / (9 * s)) ** 2)
+        self.base = np.zeros((self.fh, self.fw, 4), np.float32)
+        _over(self.base, self.INK, shadow)
+        _over(self.base, self.GLASS, self.inside)
+        self.sheen = self.inside * np.clip(1 - (self.y - self.m) / (self.h * 0.5), 0, 1) ** 2 * 0.35
+        self.rim = np.clip(1.2 - np.abs(edge + 0.7), 0, 1) * 0.55
+        self.box = np.s_[self.m:-self.m, self.m:-self.m]  # the capsule: all per-frame work stays in here
+        self.bx, self.by, self.mask = self.x[self.m:-self.m], self.y[self.m:-self.m], self.inside[self.box]
+        fall = np.clip((self.by - self.m - 0.3 * self.h) / (0.7 * self.h), 0, 1)[..., None]
+        self.tints = [np.asarray(top, np.float32) * (1 - fall) + np.asarray(deep, np.float32) * fall
+                      for top, deep, *_ in self.LAYERS]
+        self.label("")
+
+    def label(self, text):
+        from PIL import Image, ImageDraw, ImageFont
+
+        font = ImageFont.truetype("seguisb.ttf", int(14 * self.s))
+        start = (self.fw - font.getlength(text) + 18 * self.s) / 2  # dot + text centred as one group
+        canvas = Image.new("L", (self.fw, self.fh))
+        ImageDraw.Draw(canvas).text((start, self.mid), text, fill=255, font=font, anchor="lm")
+        glass = np.zeros((self.fh, self.fw, 4), np.float32)
+        _over(glass, self.WHITE, self.sheen)
+        _over(glass, self.RIM, self.rim)
+        _over(glass, self.INK, np.asarray(canvas, np.float32) / 255)
+        self.glass = glass[self.box]
+        self.dot_x = int(start - 14 * self.s)
+
+    def frame(self, t, level, dot):
+        """Premultiplied BGRA for UpdateLayeredWindow. level 0..1 is the voice; dot is an (r, g, b) status colour."""
+        out = self.base.copy()
+        water = out[self.box]
+        bottom = self.m + self.h
+        for tint, (*_, opacity, share, speed, k, phase) in zip(self.tints, self.LAYERS):
+            x = self.bx / self.s * k
+            wave = 0.6 * np.sin(x + t * speed + phase) + 0.4 * np.sin(1.9 * x - 1.4 * t * speed + 2 * phase)
+            depth = self.by - (bottom - (0.30 + 0.38 * level) * self.h * share - (1.6 + 9 * level) * self.s * wave)
+            _over(water, tint, np.clip(depth + 0.5, 0, 1) * self.mask * opacity)
+        _over(water, self.WHITE, np.clip(1 - np.abs(depth) / (1.6 * self.s), 0, 1) * self.mask * 0.5)  # glint on the front wave
+        water[:] = self.glass + water * (1 - self.glass[..., 3:])
+        r, cy = int(7 * self.s), int(self.mid)
+        spot = np.s_[cy - r:cy + r, self.dot_x - r:self.dot_x + r]
+        radius = (4.4 + 0.7 * np.sin(t * 5)) * self.s
+        _over(out[spot], dot, np.clip(radius - np.hypot(self.x[spot[1]] - self.dot_x, self.y[spot[0]] - self.mid) + 0.5, 0, 1))
+        return (out[..., [2, 1, 0, 3]] * 255).astype(np.uint8, order="C")  # raw memory for SetBitmapBits
+
+
 class Overlay:
-    """Floating pill at the bottom of the screen: live waveform + status. Never takes focus or clicks."""
-    KEY, BG, BARS = "#010203", "#1d1d21", 18
+    """Floating pill on the monitor under the cursor. Never takes focus or clicks; draws only while shown."""
+    FRAME_MS = 33
 
     def __init__(self, root):
-        s = root.winfo_fpixels("1i") / 96
-        self.s, self.W, self.H = s, int(300 * s), int(40 * s)
+        self.art = PillArt(root.winfo_fpixels("1i") / 96)
+        self.size = self.art.fw, self.art.fh
         self.win = tk.Toplevel(root)
         self.win.withdraw()
         self.win.overrideredirect(True)
-        self.win.attributes("-topmost", True, "-transparentcolor", self.KEY, "-alpha", 0.0)
-        x = (root.winfo_screenwidth() - self.W) // 2
-        y = root.winfo_screenheight() - self.H - int(90 * s)
-        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
-        c = self.canvas = tk.Canvas(self.win, width=self.W, height=self.H, bg=self.KEY, highlightthickness=0)
-        c.pack()
-        h, w = self.H, self.W
-        for shape in (c.create_oval(0, 0, h, h), c.create_oval(w - h, 0, w, h), c.create_rectangle(h / 2, 0, w - h / 2, h)):
-            c.itemconfig(shape, fill=self.BG, outline=self.BG)
-        self.dot = c.create_oval(h * 0.4, h * 0.4, h * 0.6, h * 0.6, fill="#ff453a", outline="")
-        self.bar_x = [h * 0.85 + i * 5 * s for i in range(self.BARS)]
-        self.bars = [c.create_rectangle(x, h / 2 - 1, x + 3 * s, h / 2 + 1, fill="#e5e5ea", outline="") for x in self.bar_x]
-        self.text = c.create_text(self.bar_x[-1] + 14 * s, h / 2, anchor="w", fill="white", font=("Segoe UI", 10))
-        self.levels = deque([0.0] * self.BARS, maxlen=self.BARS)
-        self.hide_job = None
+        self.win.attributes("-topmost", True)
+        self.win.geometry("{}x{}".format(*self.size))
         self.win.update_idletasks()
-        hwnd = user32.GetParent(self.win.winfo_id())
+        self.hwnd = user32.GetParent(self.win.winfo_id())
         # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED
-        user32.SetWindowLongW(hwnd, -20, user32.GetWindowLongW(hwnd, -20) | 0x08000000 | 0x80 | 0x20 | 0x80000)
+        user32.SetWindowLongW(self.hwnd, -20, user32.GetWindowLongW(self.hwnd, -20) | 0x08000000 | 0x80 | 0x20 | 0x80000)
         self.win.deiconify()
+        win32gui.ShowWindow(self.hwnd, win32con.SW_HIDE)
+        gdi32.CreateBitmap.restype = ctypes.c_void_p
+        gdi32.SetBitmapBits.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p)
+        self.bitmap = gdi32.CreateBitmap(*self.size, 1, 32, None)
+        self.dc = win32gui.CreateCompatibleDC(0)
+        win32gui.SelectObject(self.dc, self.bitmap)
+        self.drawing, self.hide_job = False, None
+        self.t = self.voice = self.target = self.fade = self.fade_to = 0.0
 
-    def show(self, text, color="#ff453a", bars=True, hide_after=None):
+    def _place(self):
+        """Bottom centre of the monitor under the cursor, re-raised every time:
+        after days of uptime the window kept its topmost bit yet sat behind ordinary windows."""
+        left, _, right, bottom = win32api.GetMonitorInfo(win32api.MonitorFromPoint(win32api.GetCursorPos(), 2))["Work"]
+        win32gui.SetWindowPos(self.hwnd, win32con.HWND_TOPMOST, (left + right - self.size[0]) // 2,
+                              bottom - self.size[1] - int(24 * self.art.s), 0, 0,
+                              win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW)
+
+    def show(self, text, color="#ff453a", live=True, hide_after=None):
         if self.hide_job:
             self.win.after_cancel(self.hide_job)
             self.hide_job = None
-        self.canvas.itemconfig(self.text, text=text)
-        self.canvas.coords(self.text, (self.bar_x[-1] + 14 * self.s) if bars else self.H * 0.85, self.H / 2)
-        self.canvas.itemconfig(self.dot, fill=color)
-        for bar in self.bars:
-            self.canvas.itemconfig(bar, state="normal" if bars else "hidden")
-        if bars:
-            self.levels.extend([0.0] * self.BARS)
-            self._draw()
-        self.win.attributes("-alpha", 0.94)
+        self.art.label(text)
+        self.dot = tuple(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        self.live, self.fade_to, self.target = live, 1.0, 0.0
+        self._place()
+        if not self.drawing:
+            self.drawing, self.clock = True, time.monotonic()
+            self._tick()
         if hide_after:
             self.hide_job = self.win.after(hide_after, self.hide)
 
     def hide(self):
         self.hide_job = None
-        self.win.attributes("-alpha", 0.0)
+        self.fade_to = 0.0
 
     def level(self, value):
-        self.levels.append(min(1.0, (value * 14) ** 0.6))
-        self._draw()
+        self.target = min(1.0, (value * 14) ** 0.6)
 
-    def _draw(self):
-        h, s = self.H, self.s
-        for bar, x, v in zip(self.bars, self.bar_x, self.levels):
-            half = max(1.0, v * h * 0.32)
-            self.canvas.coords(bar, x, h / 2 - half, x + 3 * s, h / 2 + half)
+    def _tick(self):
+        now = time.monotonic()
+        self.t += (now - self.clock) * (1.0 if self.live else 0.45)  # water calms down once you stop talking
+        self.clock = now
+        self.voice += (self.target - self.voice) * (0.35 if self.target > self.voice else 0.10)
+        self.fade += (self.fade_to - self.fade) * 0.3
+        if not self.fade_to and self.fade < 0.03:
+            self.fade, self.drawing = 0.0, False
+            win32gui.ShowWindow(self.hwnd, win32con.SW_HIDE)
+            return
+        frame = self.art.frame(self.t, self.voice, self.dot)
+        gdi32.SetBitmapBits(self.bitmap, frame.nbytes, frame.ctypes.data)
+        win32gui.UpdateLayeredWindow(self.hwnd, None, None, self.size, self.dc, (0, 0), 0, (0, 0, int(self.fade * 255), 1), 2)
+        self.win.after(self.FRAME_MS, self._tick)
 
 
 # ---------- the app ----------
@@ -443,17 +527,18 @@ class App:
         cap.start()
         cap.opened.wait(3)
         if cap.error or not cap.is_alive():
-            self.overlay.show("Microphone unavailable", "#ff9f0a", bars=False, hide_after=3000)
+            self.overlay.show("Microphone unavailable", "#ff9f0a", live=False, hide_after=3000)
             self.notify("Could not open the microphone. Check Settings › Privacy › Microphone.")
             return
         self.mic = cap
         self.overlay.show("Listening")
         self.refresh()
+        threading.Thread(target=_engine.load, daemon=True).start()  # the model loads while you speak
 
     def stop_dictation(self):
         cap, self.mic = self.mic, None
         self.transcribing = True
-        self.overlay.show("Transcribing…", "#ffd60a", bars=False)
+        self.overlay.show("Transcribing…", "#f2a900", live=False)
         self.refresh()
         threading.Thread(target=self._finish_dictation, args=(cap,), daemon=True).start()
 
@@ -681,10 +766,7 @@ class App:
         self.hotkey.start()
         threading.Thread(target=self._file_worker, daemon=True).start()
         if engine.models_ready():
-            def warm_up():
-                _engine.load()
-                self.recover_calls()
-            threading.Thread(target=warm_up, daemon=True).start()
+            threading.Thread(target=self.recover_calls, daemon=True).start()
         else:
             self.root.after(500, self.offer_download)
         self.root.after(30, self._pump)

@@ -26,6 +26,8 @@ Needs `uv` and `ffmpeg` on PATH. Puts Python, the app and models (~520 MB) in `~
 
 Autostart: copy the Start Menu shortcut into `shell:startup`.
 
+The model (~700 MB of RAM) loads when you press the hotkey and leaves memory after 5 minutes idle, or after 1 minute behind a fullscreen game or when RAM is over 85% full. `Logs\voicely.log` records each unload.
+
 ## CLI
 
 ```
