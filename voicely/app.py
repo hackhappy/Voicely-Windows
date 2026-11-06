@@ -787,7 +787,7 @@ class App:
                             "Windows port of github.com/hackhappy/Voicely (MIT).\n\n"
                             f"Speech: {model_name()}\n"
                             "Parakeet V3: NVIDIA (CC-BY-4.0), Parakeet Ultra: moondream (CC-BY-4.0),\n"
-                            "GigaAM: SberDevices (MIT), Whisper: OpenAI (MIT)\n"
+                            "GigaAM: SberDevices (MIT), Omnilingual: Meta (Apache-2.0), Whisper: OpenAI (MIT)\n"
                             "Diarization: pyannote segmentation 3.0 + WeSpeaker\n"
                             "Runtime: sherpa-onnx, fully on-device.", parent=self.root)
 

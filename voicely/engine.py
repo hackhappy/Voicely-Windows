@@ -56,6 +56,11 @@ CATALOG = {
         "url": _REL + "asr-models/sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16.tar.bz2",
         "decoder": "decoder.onnx", "joiner": "joiner.onnx",
     },
+    "omnilingual-1b": {
+        "name": "Omnilingual 1B", "size": "~750 MB", "hint": "1600 languages incl. Armenian, no punctuation",
+        "dir": "sherpa-onnx-omnilingual-asr-1600-languages-1B-ctc-v2-int8-2026-02-05", "omnilingual": True,
+        "url": _REL + "asr-models/sherpa-onnx-omnilingual-asr-1600-languages-1B-ctc-v2-int8-2026-02-05.tar.bz2",
+    },
     "whisper-turbo": {
         "name": "Whisper Turbo", "size": "~540 MB", "hint": "Any language, slow on CPU, 2.5 GB RAM",
         "dir": "sherpa-onnx-whisper-turbo", "whisper": "turbo",
@@ -241,6 +246,10 @@ class Engine:
                     tokens=str(path / f"{prefix}-tokens.txt"),
                     language="",  # detect it
                     num_threads=THREADS,
+                )
+            elif CATALOG[wanted].get("omnilingual"):
+                self._asr = sherpa_onnx.OfflineRecognizer.from_omnilingual_asr_ctc(
+                    model=str(path / "model.int8.onnx"), tokens=str(path / "tokens.txt"), num_threads=THREADS,
                 )
             else:
                 self._asr = sherpa_onnx.OfflineRecognizer.from_transducer(

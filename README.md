@@ -25,6 +25,7 @@ Tray → **Model**: a model marked `[downloaded]` is a switch; any other asks fi
 | `parakeet-ultra` (default) | Parakeet Ultra | ~640 MB | 25 European | ~1.6 GB | 2.7× |
 | `parakeet-tdt-0.6b-v3` | Parakeet V3 | ~465 MB | 25 European | ~1.5 GB | 2.8× |
 | `gigaam-v3-ru` | GigaAM V3 RU | ~160 MB | Russian only | ~1.2 GB | 5.5× |
+| `omnilingual-1b` | Omnilingual 1B | ~750 MB | 1600, incl. Armenian | ~2.4 GB | 3.7× |
 | `whisper-turbo` | Whisper Turbo | ~540 MB | any | ~2.5 GB | 1.1× |
 | `whisper-large-v3` | Whisper Large V3 | ~1 GB | any | ~4.3 GB | 0.3× |
 
@@ -33,6 +34,8 @@ Tray → **Model**: a model marked `[downloaded]` is a switch; any other asks fi
 A model loads when you press the hotkey and leaves memory after 5 minutes idle, or after 1 minute behind a fullscreen game or when RAM is over 85% full. `Logs\voicely.log` records each unload.
 
 Parakeet Ultra is a community int8 conversion of `moondream/parakeet-ultra`, so its download is pinned to one revision and every file is checked against a SHA-256 before it is used. Whisper gives no word timing, so its `transcript.jsonl` and `.srt` are per speech segment.
+
+For Armenian use Omnilingual 1B. On 20 read clips from FLEURS (`hy_am` dev) it made 3.8% character errors against 69% for Whisper Turbo, which also cut phrases short; Parakeet does not know the language. Omnilingual writes lower case without punctuation.
 
 ## Where things are
 
@@ -57,4 +60,4 @@ voicely status | mcp | connect [claude|codex|cursor]
 
 ## Credits
 
-Parakeet TDT 0.6B v3 — NVIDIA (CC-BY-4.0). Parakeet Ultra — moondream (CC-BY-4.0), sherpa-onnx conversion by Alexqwqw. GigaAM — SberDevices (MIT). Whisper — OpenAI (MIT). Runtime — [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0).
+Parakeet TDT 0.6B v3 — NVIDIA (CC-BY-4.0). Parakeet Ultra — moondream (CC-BY-4.0), sherpa-onnx conversion by Alexqwqw. GigaAM — SberDevices (MIT). Omnilingual ASR — Meta (Apache-2.0). Whisper — OpenAI (MIT). Runtime — [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0).
